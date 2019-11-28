@@ -53,6 +53,9 @@ class Detail(models.Model):
             aoi_address = 0
         else:
             aoi_result = False
+        # avoid error when fi_time is none
+        if fi_time == '':
+            fi_time = aoi_time
         aoi_time = timezone.make_aware(str2date(aoi_time))
         rst_date = date(year=aoi_time.year, month=aoi_time.month, day=aoi_time.day)
         if op_id == '':
