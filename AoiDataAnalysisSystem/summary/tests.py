@@ -1,8 +1,10 @@
 from django.test import TestCase
-from .models import Detail
+from .models import Detail, UpdateRecord
 from datetime import date, datetime
 from django.utils import timezone
-
+from django.urls import reverse
+from AoiDataAnalysisSystem import settings
+import os
 # Create your tests here.
 
 
@@ -58,3 +60,28 @@ class DetailModelTests(TestCase):
         d = Detail.create_detail('testpanelid', 'linets', 'TS550-T00-TEST', '', '', '2019112710', 'opid', 'MBD01', 8,
                                  '2019112710', is_delete=True)
         self.assertQuerysetEqual(Detail.dtlobj.all(), [])
+
+    # There is the test for update detail
+    def test_update_success(self):
+        pass
+
+    def test_update_data_index_error(self):
+        pass
+
+    def test_update_file_type_error(self):
+        pass
+
+    def test_update_redirect_no_data(self):
+        response = self.client.get(reverse('summary:update_redirect'))
+        self.assertEqual(response.status_code, 302)
+        # session have been saved, go to summary:update to get it
+        response = self.client.get(reverse('summary:update'))
+        self.assertContains(response, '数据库已是最新数据，无需更新')
+
+    def test_update_redirect_success(self):
+        Detail.create_detail('testpanelid', 'linets', 'TS550-T00-TEST', '', '', '2019112710', 'opid', 'MBD01', 8,
+                             '2019112710')
+        UpdateRecord.objects.create(col_num=0, update_type='day', update_mark='2019-11-26', update_time=timezone.now())
+        response = self.client.get(reverse('summary:update_redirect'))
+        response = self.client.get(reverse('summary:update'))
+        self.assertContains(response, '成功更新日/周/月/季/年数据')

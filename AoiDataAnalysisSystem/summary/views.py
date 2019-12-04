@@ -4,11 +4,14 @@ from django.views import generic
 from summary.models import UpdateRecord, Detail
 import xlrd
 import os
+from datetime import datetime, date
 from AoiDataAnalysisSystem import settings
 from django.urls import reverse
 from django.db.models import Q
 from daily.models import DayData
 from datetime import date
+from django.utils import timezone
+
 
 class IndexView(generic.ListView):
     pass
@@ -71,7 +74,7 @@ def update_detail(request):
 def update_redirect(request):
     # if there is none in record, it will count from Detail(pk=1)
     # the part for daily
-    if UpdateRecord.objects.values('col_num').filter(update_type='day').exists():
+    if not UpdateRecord.objects.values('col_num').filter(update_type='day').exists():
         record_num = 0
         mark_day = date(1970, 1, 1)
     else:
@@ -99,12 +102,14 @@ def update_redirect(request):
             DayData.create_day(rst_date=rst_date, miss=miss, overkill=overkill, useless=useless, aoi_in=aoi_in,
                                aoi_ng=aoi_ng, fi_in=fi_in)
         except Exception as err:
-            UpdateRecord.objects.create(update_type='day', update_col=record_num, update_mark='{0}-{1}-{2}'.format(
-                dt.year, dt.month, dt.day))
+            UpdateRecord.objects.create(update_type='day', col_num=record_num, update_mark='{0}-{1}-{2}'.format(
+                dt.year, dt.month, dt.day), update_time=timezone.now())
             request.session['msg'] = '更新日别数据出现异常如下:{0}'.format(err)
             return redirect(reverse('summary:update'))
     # the part for week
     # the part for month, quarter, year
+    UpdateRecord.objects.create(update_type='day', col_num=Detail.dtlobj.last().pk, update_mark='{0}-{1}-{2}'.format(
+                                max(day_list).year, max(day_list).month, max(day_list).day), update_time=datetime.now())
     request.session['msg'] = r'成功更新日/周/月/季/年数据'
     return redirect(reverse('summary:update'))
 
