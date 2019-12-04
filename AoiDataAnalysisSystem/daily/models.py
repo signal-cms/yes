@@ -20,6 +20,12 @@ class DayData(models.Model):
 
     @classmethod
     def create_day(cls, rst_date, miss, overkill, useless, aoi_in, aoi_ng, fi_in):
+        def artificial_division(x, y):
+            if y == 0:
+                return 0
+            else:
+                return x/y
+
         if DayData.objects.filter(rst_date=rst_date).exists():
             data = DayData.objects.get(rst_date=rst_date)
             data.miss += miss
@@ -29,20 +35,20 @@ class DayData(models.Model):
             data.aoi_ok += aoi_in - aoi_ng
             data.aoi_ng += aoi_ng
             data.fi_in += fi_in
-            data.miss_rate = data.miss / data.aoi_in
-            data.overkill_rate = data.overkill / data.aoi_in
-            data.useless_rate = data.useless / data.aoi_in
-            data.miss_aoi = data.miss / (data.fi_in - data.aoi_ng)
-            data.overkill_aoi = data.overkill / (data.aoi_ng - data.useless)
+            data.miss_rate = artificial_division(data.miss, data.aoi_in)
+            data.overkill_rate = artificial_division(data.overkill, data.aoi_in)
+            data.useless_rate = artificial_division(data.useless, data.aoi_in)
+            data.miss_aoi = artificial_division(data.miss, (data.fi_in - data.aoi_ng))
+            data.overkill_aoi = artificial_division(data.overkill, (data.aoi_ng - data.useless))
             data.save()
         else:
             aoi_ok = aoi_in - aoi_ng
             year = rst_date.year
-            miss_rate = miss / aoi_in
-            overkill_rate = overkill / aoi_in
-            useless_rate = useless / aoi_in
-            miss_aoi = miss / (fi_in - aoi_ng)
-            overkill_aoi = overkill / (aoi_ng - useless)
+            miss_rate = artificial_division(miss, aoi_in)
+            overkill_rate = artificial_division(overkill, aoi_in)
+            useless_rate = artificial_division(useless, aoi_in)
+            miss_aoi = artificial_division(miss, (fi_in - aoi_ng))
+            overkill_aoi = artificial_division(overkill, (aoi_ng - useless))
             data = cls(year=year, rst_date=rst_date, miss=miss, overkill=overkill, useless=useless, aoi_in=aoi_in,
                        aoi_ok=aoi_ok, aoi_ng=aoi_ng, fi_in=fi_in, miss_rate=miss_rate, overkill_rate=overkill_rate,
                        useless_rate=useless_rate, miss_aoi=miss_aoi, overkill_aoi=overkill_aoi)

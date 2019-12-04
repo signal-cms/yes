@@ -40,3 +40,7 @@ class DailyModelTests(TestCase):
         self.assertEqual(data.aoi_ng, 4000)
         self.assertEqual(data.aoi_ok, 16000)
         self.assertEqual(data.fi_in, 6000)
+
+    def test_create_day_division_zero(self):
+        data = DayData.create_day(date(2019, 11, 30), 20, 1500, 50, 10000, 3000, 3000)
+        self.assertEqual(data.miss_aoi, 0)
