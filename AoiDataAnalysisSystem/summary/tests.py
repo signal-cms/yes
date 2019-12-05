@@ -5,6 +5,8 @@ from django.utils import timezone
 from django.urls import reverse
 from AoiDataAnalysisSystem import settings
 import os
+from daily.models import DayData
+from week.models import WeekData
 # Create your tests here.
 
 
@@ -71,17 +73,62 @@ class DetailModelTests(TestCase):
     def test_update_file_type_error(self):
         pass
 
-    def test_update_redirect_no_data(self):
-        response = self.client.get(reverse('summary:update_redirect'))
-        self.assertEqual(response.status_code, 302)
-        # session have been saved, go to summary:update to get it
-        response = self.client.get(reverse('summary:update'))
-        self.assertContains(response, '数据库已是最新数据，无需更新')
+    def test_update_day_normal(self):
+        d = Detail.create_detail('testpanelid', 'linets', 'TS550-T00-TEST', '', '', '2019112710', 'opid', 'MBD01', 8,
+                                 '2019112710')
+        self.client.get(reverse('summary:update_redirect_day'))
+        data = DayData.objects.get(rst_date=date(2019, 11, 27))
+        self.assertEqual(data.year, 2019)
+        self.assertEqual(data.miss, 1)
+        self.assertEqual(data.overkill, 0)
+        self.assertEqual(data.useless, 0)
+        self.assertEqual(data.aoi_in, 1)
+        self.assertEqual(data.aoi_ok, 1)
+        self.assertEqual(data.aoi_ng, 0)
+        self.assertEqual(data.fi_in, 1)
+        self.assertEqual(data.miss_rate, 1)
+        self.assertEqual(data.overkill_rate, 0)
+        self.assertEqual(data.useless_rate, 0)
+        self.assertEqual(data.miss_aoi, 1)
+        self.assertEqual(data.overkill_aoi, 0)
+        rcd = UpdateRecord.objects.filter(update_type='day').order_by('update_time').last()
+        self.assertEqual(rcd.col_num, d.pk)
+        self.assertEqual(rcd.update_mark, '2019-11-27')
 
-    def test_update_redirect_success(self):
-        Detail.create_detail('testpanelid', 'linets', 'TS550-T00-TEST', '', '', '2019112710', 'opid', 'MBD01', 8,
-                             '2019112710')
-        UpdateRecord.objects.create(col_num=0, update_type='day', update_mark='2019-11-26', update_time=timezone.now())
-        response = self.client.get(reverse('summary:update_redirect'))
-        response = self.client.get(reverse('summary:update'))
-        self.assertContains(response, '成功更新日/周/月/季/年数据')
+    def test_update_week_normal(self):
+        DayData.create_day(rst_date=date(2019, 1, 1), miss=10, overkill=100, useless=10, aoi_in=1000, aoi_ng=200,
+                           fi_in=400)
+        col = DayData.create_day(rst_date=date(2019, 1, 2), miss=10, overkill=100, useless=10, aoi_in=1000, aoi_ng=200,
+                                 fi_in=400)
+        self.client.get(reverse('summary:update_redirect_week'))
+        data = WeekData.objects.get(year=2019, week_num=1)
+        self.assertEqual(data.miss, 20)
+        self.assertEqual(data.overkill, 200)
+        self.assertEqual(data.useless, 20)
+        self.assertEqual(data.aoi_in, 2000)
+        self.assertEqual(data.aoi_ok, 1600)
+        self.assertEqual(data.aoi_ng, 400)
+        self.assertEqual(data.fi_in, 800)
+        self.assertEqual(data.miss_rate, 10/1000)
+        self.assertEqual(data.overkill_rate, 100/1000)
+        self.assertEqual(data.useless_rate, 10/1000)
+        self.assertEqual(data.miss_aoi, 10/200)
+        self.assertEqual(data.overkill_aoi, 100/190)
+        rcd = UpdateRecord.objects.filter(update_type='week').order_by('update_time').last()
+        self.assertEqual(rcd.col_num, col.pk)
+        self.assertEqual(rcd.update_mark, '2019.01')
+
+    # def test_update_redirect_day_no_data(self):
+    #     response = self.client.get(reverse('summary:update_redirect'))
+    #     self.assertEqual(response.status_code, 302)
+    #     # session have been saved, go to summary:update to get it
+    #     response = self.client.get(reverse('summary:update'))
+    #     self.assertContains(response, '数据库已是最新数据，无需更新')
+    #
+    # def test_update_redirect_day_success(self):
+    #     Detail.create_detail('testpanelid', 'linets', 'TS550-T00-TEST', '', '', '2019112710', 'opid', 'MBD01', 8,
+    #                          '2019112710')
+    #     UpdateRecord.objects.create(col_num=0, update_type='day', update_mark='2019-11-26', update_time=timezone.now())
+    #     response = self.client.get(reverse('summary:update_redirect'))
+    #     response = self.client.get(reverse('summary:update'))
+    #     self.assertContains(response, '成功更新日/周/月/季/年数据')
