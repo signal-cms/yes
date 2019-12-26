@@ -262,7 +262,6 @@ class LaiThread:
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t2 - t1)
         with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
             fh.write('\n{0}'.format(log))
-        self.clear_program()
         self._run_spider()
 
     @staticmethod
@@ -393,7 +392,7 @@ class LaiThread:
             online_w_bank[i].start()
         for i in range(10):
             online_w_bank[i].join()
-        os.system('pkill -9 -u root chrome')
+        self.clear_program()
 
     def _write_online_data(self, room_list, online_info_dict):
         conn = pymysql.connect(

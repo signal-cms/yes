@@ -1,4 +1,5 @@
 # -*- coding:utf-8 -*-
+# this program design for spider the msg of status_change anchor and hot anchor
 import copy
 import requests
 from datetime import datetime
@@ -99,7 +100,7 @@ class LaiThread:
             'port': 3306,
             'user': 'tester',
             'password': 'Test_1357642',
-            'db': 'laifeng'}  # Test_1357642
+            'db': 'laifeng'}
 
         def new_get(k): return database_dict.get(k, default_database_dict[k])
         if isinstance(database_dict, dict):
@@ -118,6 +119,7 @@ class LaiThread:
         self.consumer_mark_db = 'consumermark'
         self.anchor_mark_db = 'anchormark'
         self.living_db = 'living'
+        self.hot_anchor_db = 'hot'
 
     def create_database(self):
         conn = pymysql.connect(
@@ -206,23 +208,37 @@ class LaiThread:
         return '_'.join(int_list)
 
     def run_spider(self):
+        hot_list = self._get_hot_list()
+        # self._run_spider(hot_list)
         try:
-            self._run_spider()
+            self._run_spider(hot_list)
         except Exception as err:
             # when err restart and write into run.log
             with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
                 fh.write('\n{0} restart'.format(datetime.now()))
-            os.system('pkill -9 -u root chrome')
+            self.clear_program()
             self.clean()
             sleep(5)
             self.run_spider()
 
-    def _run_spider(self):
+    def _get_hot_list(self):
+        hot_list = []
+        # read hot list
+        hot_mark = self.read_db_all(self.hot_anchor_db, 1, 1)
+        raw_list = self.read_db_all(self.hot_anchor_db, 2, int(hot_mark[0][1]))
+        for room in raw_list:
+            pat_list = room[1].split('_')
+            for room_id in pat_list:
+                hot_list.append(room_id)
+        return hot_list
+
+    def _run_spider(self, hot_list):
+        spider_list = []
         t1 = time.time()
         room_list = self.get_living_room_id
         living_list = []
         for info in room_list:
-            living_list.append(info[0])
+            living_list.append(int(info[0]))
         living_mark = self.read_db_all(self.living_db, 1, 1)
         off_line_list = []
         last_living_list = []
@@ -243,27 +259,44 @@ class LaiThread:
                     self.living_db, 2, int(mark_list[0]))
                 for info in old_living_list:
                     living_part = info[1].split('_')
-                    for roomid in living_part:
-                        last_living_list.append(roomid)
+                    for room_id in living_part:
+                        last_living_list.append(int(room_id))
         # update living list
         self.update_living_list(living_list)
+        # if hot anchor is living, add it into spider_list
+        for room_id in hot_list:
+            if int(room_id) in living_list:
+                spider_list.append(int(room_id))
+        # if people get into offline, add it into spider_list
         if last_living_list:
             for room_id in last_living_list:
-                if int(room_id) not in living_list:
+                if room_id not in living_list:
                     off_line_list.append(room_id)
+            for room_id in living_list:
+                if room_id not in spider_list and room_id not in last_living_list:
+                    spider_list.append(room_id)
+        else:
+            for room_id in living_list:
+                spider_list.append(room_id)
         if off_line_list:
             for room_id in off_line_list:
-                room_list.append([room_id, '下播检查', 1])
-        self._online_task(room_list)
+                spider_list.append(room_id)
+        self._online_task(spider_list)
         self._offline_task(off_line_list)
-        self._write_mark(len(living_list))
+        sleep(2)
+        self._write_mark(len(spider_list))
         t2 = time.time()
         log = '{0} {1}'.format(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t2 - t1)
         with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
             fh.write('\n{0}'.format(log))
-        os.system('pkill -9 -u root chrome')
-        self._run_spider()
+        self._run_spider(hot_list)
+
+    @staticmethod
+    def clear_program():
+        os.system("ps -ef | grep chrome | grep -v grep | awk '{print $2}' | xargs kill -9")
+        os.system("ps -ef | grep chromedriver | grep -v grep | awk '{print $2}' | xargs kill -9")
+        os.system("ps -ef | grep webdriver | grep -v grep | awk '{print $2}' | xargs kill -9")
 
     def _write_mark(self, living_num):
         conn = pymysql.connect(
@@ -393,7 +426,7 @@ class LaiThread:
             online_w_bank[i].start()
         for i in range(10):
             online_w_bank[i].join()
-        os.system('pkill -9 -u root chrome')
+        self.clear_program()
 
     def _write_online_data(self, room_list, online_info_dict):
         conn = pymysql.connect(
@@ -405,30 +438,29 @@ class LaiThread:
             charset='utf8')
         cu = conn.cursor()
         for room_info in room_list:
-            if online_info_dict.get(room_info[0]):
-                data = online_info_dict[room_info[0]]
+            if online_info_dict.get(room_info):
+                data = online_info_dict[room_info]
                 try:
                     sql_command = "INSERT INTO {6}(roomid,peo,xingbi,renqi,online,time) VALUES ('{0}','{1}','{2}'," \
                                   "'{3}','{4}','{5}')".format(
-                                        room_info[0], room_info[1].replace("'", ''), data[0], data[1], data[2],
+                                        room_info, data[0].replace("'", ''), data[1], data[2], data[3],
                                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.anchor_db
                                                             )
                     cu.execute(sql_command)
                     conn.commit()
                 except Exception as err:
-                    msg_err = ' '.join([str(m) for m in room_info])
                     data_err = ' '.join([str(da) for da in data])
                     with open(os.path.join(
                             self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
                         fh.write(
                             '\n{0} write_sql_err:{1}\nmgs:{2}\ndata:{3}'.format(
-                                datetime.now(), err, msg_err, data_err))
+                                datetime.now(), err, room_info, data_err))
             else:
                 with open(os.path.join(
                         self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
                     fh.write(
-                        '\n{0} no_rank:{1}'.format(
-                            datetime.now(), room_info[0]))
+                        '\n{0} no_read_data:{1}'.format(
+                            datetime.now(), room_info))
         cu.close()
         conn.close()
 
@@ -442,10 +474,10 @@ class LaiThread:
         options.add_argument('blink-settings=imagesEnabled=false')
         client = webdriver.Chrome(chrome_options=options)
         for room in room_list:
-            client.get(self.room_url.format(room[0]))
-            sleep(3)
+            client.get(self.room_url.format(room))
+            sleep(4)
             try:
-                WebDriverWait(client, 3).until_not(
+                WebDriverWait(client, 4).until_not(
                     self.LoadSuccess()
                 )
                 load_status = True
@@ -453,19 +485,19 @@ class LaiThread:
                 load_status = False
             if load_status:
                 try:
-                    online_info_dict[room[0]] = self.v_type_xpath(client)
+                    online_info_dict[room] = self.v_type_xpath(client)
                 except Exception as err:
                     with open(os.path.join(
                             self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
                         fh.write(
                             '\n{0} no_v_xpath:{1} err:{2}'.format(
-                                datetime.now(), room[0], err))
-                    online_info_dict[room[0]] = self.h_type_xpath(client)
+                                datetime.now(), room, err))
+                    online_info_dict[room] = self.h_type_xpath(client)
             else:
                 try:
-                    online_info_dict[room[0]] = self.h_type_xpath(client)
+                    online_info_dict[room] = self.h_type_xpath(client)
                 except Exception as err:
-                    online_info_dict[room[0]] = self.v_type_xpath(client)
+                    online_info_dict[room] = self.v_type_xpath(client)
         client.quit()
 
     @staticmethod
@@ -483,7 +515,10 @@ class LaiThread:
             '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[2]/div[2]/'
             'span[@class="online-people_rLgAG"]').text
         online = pat.findall(online)[0]
-        return [star_coin, popular, online]
+        name = client.find_element_by_xpath(
+            '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]'
+        ).text
+        return [name, star_coin, popular, online]
 
     @staticmethod
     def v_type_xpath(client):
@@ -496,7 +531,10 @@ class LaiThread:
         online = client.find_element_by_xpath(
             '//*[@id="LF-info-count"]/div/div[@class="online"]/div[@class="info"]/cite'
         ).text
-        return [star_coin, popular, online]
+        name = client.find_element_by_xpath(
+            '/html/body/div/div[2]/div[2]/div[2]/dl/dd/span'
+        ).text
+        return [name, star_coin, popular, online]
 
     class LoadSuccess:
         # h_type return True, v_type return according to element.text
