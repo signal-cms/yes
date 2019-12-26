@@ -243,8 +243,9 @@ class LaiThread:
                     self.living_db, 2, int(mark_list[0]))
                 for info in old_living_list:
                     living_part = info[1].split('_')
-                    for roomid in living_part:
-                        last_living_list.append(roomid)
+                    for room_id in living_part:
+                        last_living_list.append(room_id)
+                last_living_list = list(set(last_living_list))
         # update living list
         self.update_living_list(living_list)
         if last_living_list:
@@ -255,6 +256,11 @@ class LaiThread:
             for room_id in off_line_list:
                 room_list.append([room_id, '下播检查', 1])
         self._online_task(room_list)
+        t = datetime.now()
+        if t.hour == 23 and t.minute >= 50:
+            off_line_list = []
+            for room_id in room_list:
+                off_line_list.append(room_id[0])
         self._offline_task(off_line_list)
         self._write_mark(len(living_list))
         t2 = time.time()
@@ -463,8 +469,15 @@ class LaiThread:
             else:
                 try:
                     online_info_dict[room[0]] = self.h_type_xpath(client)
-                except Exception as err:
-                    online_info_dict[room[0]] = self.v_type_xpath(client)
+                except Exception:
+                    try:
+                        online_info_dict[room[0]] = self.v_type_xpath(client)
+                    except Exception as err:
+                        with open(os.path.join(
+                                self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
+                            fh.write(
+                                '\n{0} second_v_xpath_err:{1} err:{2}'.format(
+                                    datetime.now(), room[0], err))
         client.quit()
 
     @staticmethod
