@@ -281,6 +281,11 @@ class LaiThread:
         if off_line_list:
             for room_id in off_line_list:
                 spider_list.append(room_id)
+        task_time = datetime.now()
+        if task_time.hour == 23 and task_time.minute >= 45:
+            for room_id in living_list:
+                off_line_list.append(room_id)
+            off_line_list = list(set(off_line_list))
         self._online_task(spider_list)
         self._offline_task(off_line_list)
         sleep(2)
@@ -496,8 +501,15 @@ class LaiThread:
             else:
                 try:
                     online_info_dict[room] = self.h_type_xpath(client)
-                except Exception as err:
-                    online_info_dict[room] = self.v_type_xpath(client)
+                except Exception:
+                    try:
+                        online_info_dict[room] = self.v_type_xpath(client)
+                    except Exception as err:
+                        with open(os.path.join(
+                                self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
+                            fh.write(
+                                '\n{0} second_v_xpath_err:{1} err:{2}'.format(
+                                    datetime.now(), room, err))
         client.quit()
 
     @staticmethod
