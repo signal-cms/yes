@@ -15,6 +15,9 @@ import threading
 import warnings
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from lxml import etree
+import traceback
+import re
 
 
 class NormalSpider:
@@ -119,6 +122,8 @@ class LaiThread:
         self.consumer_mark_db = 'consumermark'
         self.anchor_mark_db = 'anchormark'
         self.living_db = 'living'
+        self.useless_db = 'useless'
+        self.zero_db = 'zero'
         self.hot_anchor_db = 'hot'
 
     def create_database(self):
@@ -153,21 +158,55 @@ class LaiThread:
         cu.execute(consumer_mark_sql)
         conn.commit()
         # living mark db
-        living_sql = 'create table if not exists {}(id int unique, content varchar(100), primary key(id)) ' \
+        living_sql = 'create table if not exists {}(id int unique, content varchar(150), primary key(id)) ' \
                      'charset=utf8'.format(self.living_db)
         cu.execute(living_sql)
+        conn.commit()
+        # useless data to retry
+        useless_sql = 'create table if not exists {}(id int unique, content varchar(150), primary key(id)) ' \
+                      'charset=utf8'.format(self.useless_db)
+        cu.execute(useless_sql)
+        conn.commit()
+        # offline zero data to retry
+        zero_sql = 'create table if not exists {}(id int unique, content varchar(150), primary key(id)) ' \
+                   'charset=utf8'.format(self.zero_db)
+        cu.execute(zero_sql)
         conn.commit()
         cu.close()
         conn.close()
 
+    # return the one in spe_list but not in search_list
     @staticmethod
-    def request_get_more(url_dict, rst_dict):
+    def get_not_in_list(spe_list, search_list):
+        not_in_list = []
+        for one in spe_list:
+            if one not in search_list:
+                not_in_list.append(one)
+        return not_in_list
+
+    # return the one in spe_list and in search_list
+    @staticmethod
+    def get_in_list(spe_list, search_list):
+        in_list = []
+        for one in spe_list:
+            if one in search_list:
+                in_list.append(one)
+        return in_list
+
+    def request_get_more(self, url_dict, rst_dict):
         spider = NormalSpider()
+        err_key = []
         for key, values in url_dict.items():
-            data = spider.request_get(values)
-            js = json.loads(data)
-            rst_dict[key] = copy.deepcopy(js)
-        return None
+            try:
+                data = spider.request_get(values)
+                js = json.loads(data)
+                rst_dict[key] = copy.deepcopy(js)
+            except Exception as err:
+                err_key.append(key)
+                self._write_exception_log(
+                    '\n{0} request_info_error url:{1}\n{2}'.format(datetime.now(), values, err)
+                )
+        return err_key
 
     def read_db_all(self, db_name, start_id, end_id):
         conn = pymysql.connect(
@@ -203,9 +242,51 @@ class LaiThread:
     @staticmethod
     def join_num(raw_list):
         int_list = copy.deepcopy(raw_list)
-        for i in range(len(int_list)):
-            int_list[i] = str(int_list[i])
+        int_list = list(map(str, int_list))
         return '_'.join(int_list)
+
+    def _write_exception_log(self, content):
+        with open(os.path.join(
+                self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
+            fh.write(content)
+
+    def _write_run_log(self, content):
+        with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
+            fh.write(content)
+
+    @staticmethod
+    def join_list(one_list, other_list):
+        rst_list = []
+        for item in one_list:
+            rst_list.append(item)
+        for item in other_list:
+            rst_list.append(item)
+        return rst_list
+
+    @staticmethod
+    def add2item(add_list, add2item):
+        for item in add_list:
+            add2item.add(item)
+
+    # sort para for one para threading_task
+    @staticmethod
+    def sort_thread_para_list(para_list, default_task_num=10):
+        task_list = []
+        list_len = len(para_list)
+        if list_len <= default_task_num:
+            for item in para_list:
+                task_list.append([item, ])
+        else:
+            for i in range(default_task_num):
+                task_list.append([])
+            write_num = 0
+            while write_num < list_len:
+                for i in range(default_task_num):
+                    task_list[i].append(para_list[write_num])
+                    write_num += 1
+                    if write_num == list_len:
+                        break
+        return task_list
 
     def run_spider(self):
         hot_list = self._get_hot_list()
@@ -213,9 +294,9 @@ class LaiThread:
         try:
             self._run_spider(hot_list)
         except Exception as err:
+            traceback.print_exc()
             # when err restart and write into run.log
-            with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-                fh.write('\n{0} restart'.format(datetime.now()))
+            self._write_run_log('\n{0} restart'.format(datetime.now()))
             self.clear_program()
             self.clean()
             sleep(5)
@@ -230,78 +311,197 @@ class LaiThread:
             pat_list = room[1].split('_')
             for room_id in pat_list:
                 hot_list.append(room_id)
-        return hot_list
+        return list(map(int, hot_list))
 
     def _run_spider(self, hot_list):
-        spider_list = []
         t1 = time.time()
+        # get living_list include room_id,some of them maybe redundant
         room_list = self.get_living_room_id
         living_list = []
         for info in room_list:
             living_list.append(int(info[0]))
+        # delete redundant data
+        living_list = set(living_list)
+        # anchor_list include room_id which will be spidered by selenium
+        anchor_list = set()
+        # consumer_task_list to save the room_id to get consumer rank
+        consumer_task_list = set()
+        # add hot_list into consumer_task to avoid kongshua
+        self.add2item(hot_list, consumer_task_list)
+        # first step: get the room_id run_error in last spider and when offline whose data having zero
+        # add them into task_list
+        useless_mark = self.read_db_all(self.useless_db, 1, 1)
+        if useless_mark:
+            mark_string = useless_mark[0][1]
+            if mark_string:
+                mark_list = mark_string.split('_')
+                mark_date = datetime(
+                    year=int(mark_list[1]),
+                    month=int(mark_list[2]),
+                    day=int(mark_list[3]),
+                    hour=int(mark_list[4]),
+                    minute=int(mark_list[5]),
+                    second=int(mark_list[6])
+                )
+                if (datetime.now() - mark_date).seconds < 3600:
+                    useless_list = self.read_db_all(self.useless_db, 2, int(mark_list[0]))
+                    for info in useless_list:
+                        part_info = info[1].split('_')
+                        self.add2item(list(map(int, part_info)), anchor_list)
+        zero_mark = self.read_db_all(self.zero_db, 1, 1)
+        if zero_mark:
+            mark_string = zero_mark[0][1]
+            if mark_string:
+                mark_list = mark_string.split('_')
+                mark_date = datetime(
+                    year=int(mark_list[1]),
+                    month=int(mark_list[2]),
+                    day=int(mark_list[3]),
+                    hour=int(mark_list[4]),
+                    minute=int(mark_list[5]),
+                    second=int(mark_list[6])
+                )
+                if (datetime.now() - mark_date).seconds < 1800:
+                    zero_list = self.read_db_all(self.zero_db, 2, int(mark_list[0]))
+                    for info in zero_list:
+                        part_info = info[1].split('_')
+                        self.add2item(list(map(int, part_info)), anchor_list)
+        # second step: get last_living_list to get online and offline list. if not exist, suspect the hot list to avoid
+        # loss of data
         living_mark = self.read_db_all(self.living_db, 1, 1)
-        off_line_list = []
         last_living_list = []
+        online_list = []
+        offline_list = [[], []]
         if living_mark:
             mark_string = living_mark[0][1]
-            mark_list = mark_string.split('_')
-            mark_date = datetime(
-                year=int(
-                    mark_list[1]), month=int(
-                    mark_list[2]), day=int(
-                    mark_list[3]), hour=int(
-                    mark_list[4]), minute=int(
-                        mark_list[5]), second=int(
-                            mark_list[6]))
-            now_time = datetime.now()
-            if (now_time - mark_date).seconds < 3600:
-                old_living_list = self.read_db_all(
-                    self.living_db, 2, int(mark_list[0]))
-                for info in old_living_list:
-                    living_part = info[1].split('_')
-                    for room_id in living_part:
-                        last_living_list.append(int(room_id))
-        # update living list
-        self.update_living_list(living_list)
-        # if hot anchor is living, add it into spider_list
-        for room_id in hot_list:
-            if int(room_id) in living_list:
-                spider_list.append(int(room_id))
-        # if people get into offline, add it into spider_list
-        if last_living_list:
-            for room_id in last_living_list:
-                if room_id not in living_list:
-                    off_line_list.append(room_id)
-            for room_id in living_list:
-                if room_id not in spider_list and room_id not in last_living_list:
-                    spider_list.append(room_id)
+            if mark_string:
+                mark_list = mark_string.split('_')
+                # last_living lives in 1 hour
+                mark_date = datetime(
+                    year=int(mark_list[1]),
+                    month=int(mark_list[2]),
+                    day=int(mark_list[3]),
+                    hour=int(mark_list[4]),
+                    minute=int(mark_list[5]),
+                    second=int(mark_list[6])
+                )
+        if living_mark and living_mark[0][1] and (datetime.now() - mark_date).seconds < 3600:
+            old_living_list = self.read_db_all(self.living_db, 2, int(mark_list[0]))
+            for info in old_living_list:
+                living_part = info[1].split('_')
+                for room_id in living_part:
+                    last_living_list.append(int(room_id))
+            # get offline list
+            suspect_offline = self.get_not_in_list(last_living_list, living_list)
+            offline_list = self.get_sort_suspect_list(suspect_offline)
+            # add fake offline into living_list
+            self.add2item(offline_list[1], living_list)
+            # get online list
+            suspect_online = self.get_not_in_list(living_list, last_living_list)
+            online_list = self.get_sort_suspect_list(suspect_online)[1]
+            # add offline and online to anchor_list
+            self.add2item(offline_list[0], anchor_list)
+            self.add2item(online_list, anchor_list)
+            # third step: add hot and online anchor to anchor_list
+            hot_online = self.get_in_list(hot_list, living_list)
+            # add hot_online to anchor_list
+            self.add2item(hot_online, anchor_list)
+            # add offline 2 consumer_task_list
+            self.add2item(offline_list[0], consumer_task_list)
         else:
-            for room_id in living_list:
-                spider_list.append(room_id)
-        if off_line_list:
-            for room_id in off_line_list:
-                spider_list.append(room_id)
-        task_time = datetime.now()
-        if task_time.hour == 23 and task_time.minute >= 45:
-            for room_id in living_list:
-                off_line_list.append(room_id)
-            off_line_list = list(set(off_line_list))
-        self._online_task(spider_list)
-        self._offline_task(off_line_list)
-        sleep(2)
-        self._write_mark(len(spider_list))
+            # get anchor_list who is not in living_list, get its isShowing
+            suspect_list = self.get_not_in_list(hot_list, living_list)
+            sorted_suspect_list = self.get_sort_suspect_list(suspect_list)[1]
+            self.add2item(sorted_suspect_list, living_list)
+            # add all into anchor_list
+            self.add2item(living_list, anchor_list)
+        # add living list into consumer task
+        self.add2item(living_list, consumer_task_list)
+        # change set into list
+        living_list = list(living_list)
+        anchor_list = list(anchor_list)
+        consumer_task_list = list(consumer_task_list)
+        # start spider
+        no_data_room_list = self._anchor_task(anchor_list, offline_list[0])
+        self._consumer_task(consumer_task_list)
+        # update living list
+        self.update_ten_mark_list(self.living_db, living_list)
+        # update useless list
+        if no_data_room_list[0]:
+            self.update_ten_mark_list(self.useless_db, no_data_room_list[0])
+        else:
+            self._drop_rebuilt(self.useless_db)
+        # update zero
+        if no_data_room_list[1]:
+            self.update_ten_mark_list(self.zero_db, no_data_room_list[1])
+        else:
+            self._drop_rebuilt(self.zero_db)
+        # write mark
+        self._write_mark(len(anchor_list))
         t2 = time.time()
-        log = '{0} {1}'.format(
+        log = '\n{0} {1}'.format(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t2 - t1)
-        with open(os.path.join(self.log_path, self.run_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-            fh.write('\n{0}'.format(log))
+        self._write_run_log(log)
+        if time.localtime(t2).tm_hour == 5 and time.localtime(t2).tm_min < 5:
+            hot_list = self._get_hot_list()
         self._run_spider(hot_list)
+
+    def _drop_rebuilt(self, db_name):
+        sql_list = [
+            'truncate table {};'.format(db_name),
+        ]
+        self.execute_db_more(sql_list)
+
+    # thread to sort list renturn [not_showing_list, showing_list]
+    def get_sort_suspect_list(self, suspect_list):
+        return_list = [[], []]
+        if suspect_list:
+            # thread to finish task
+            show_task_list = self.sort_thread_para_list(suspect_list)
+            show_task_bank = []
+            for task in show_task_list:
+                show_task_bank.append(threading.Thread(
+                    target=self.get_showing_status, args=(task, return_list, )
+                ))
+            for task in show_task_bank:
+                task.start()
+            for task in show_task_bank:
+                task.join()
+        return return_list
+
+    # return [not_showing_list, showing_list]
+    def get_showing_status(self, search_list, return_list=None):
+        if return_list is None:
+            return_list = [[], []]
+        spider = NormalSpider()
+        show_pat = re.compile(r'"isShowing": (.*?),')
+        for room_id in search_list:
+            data = spider.request_get(self.room_url.format(room_id))
+            is_showing = show_pat.findall(data)[0]
+            if is_showing == 'false':
+                return_list[0].append(room_id)
+            elif is_showing == 'true':
+                return_list[1].append(room_id)
+            else:
+                self._write_exception_log(
+                    '\n{0} except type of showing_status:{1} room:{2}'.format(datetime.now(), is_showing, room_id)
+                )
+        return return_list
 
     @staticmethod
     def clear_program():
-        os.system("ps -ef | grep chrome | grep -v grep | awk '{print $2}' | xargs kill -9")
-        os.system("ps -ef | grep chromedriver | grep -v grep | awk '{print $2}' | xargs kill -9")
-        os.system("ps -ef | grep webdriver | grep -v grep | awk '{print $2}' | xargs kill -9")
+        try:
+            os.system("ps -ef | grep chrome | grep -v grep | awk '{print $2}' | xargs kill -9")
+        except Exception:
+            pass
+        try:
+            os.system("ps -ef | grep chromedriver | grep -v grep | awk '{print $2}' | xargs kill -9")
+        except Exception:
+            pass
+        try:
+            os.system("ps -ef | grep webdriver | grep -v grep | awk '{print $2}' | xargs kill -9")
+        except Exception:
+            pass
 
     def _write_mark(self, living_num):
         conn = pymysql.connect(
@@ -320,7 +520,7 @@ class LaiThread:
             data[0][0], living_num, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.anchor_mark_db)
         cu.execute(sql_insert)
         conn.commit()
-        get_last_sql = 'SELECT id FROM {} ORDER BY time DESC LIMIT 1'.format(
+        get_last_sql = 'SELECT id FROM {} ORDER BY id DESC LIMIT 1'.format(
             self.consumer_db)
         cu.execute(get_last_sql)
         cur_data = cu.fetchall()
@@ -336,104 +536,100 @@ class LaiThread:
         cu.close()
         conn.close()
 
-    def _offline_task(self, room_list):
-        offline_info_dict = {}
-        # offline request task
-        offline_task_num = math.ceil(len(room_list) / 10)
-        offline_task_list = []
-        for i in range(1, 10):
-            offline_task_list.append(
-                room_list[offline_task_num * (i - 1):offline_task_num * i])
-        offline_task_list.append(room_list[offline_task_num * 9:])
-        offline_bank = []
-        for i in range(10):
-            offline_th = threading.Thread(
-                target=self._off_task_medium, args=(
-                    offline_task_list[i], offline_info_dict,))
-            offline_bank.append(offline_th)
-        for i in range(10):
-            offline_bank[i].start()
-        for i in range(10):
-            offline_bank[i].join()
+    def _consumer_task(self, consumer_task_list):
+        consumer_info_dict = {}
+        consumer_task = self.sort_thread_para_list(para_list=consumer_task_list, default_task_num=10)
+        task_bank = []
+        for task_info in consumer_task:
+            task_bank.append(threading.Thread(
+                target=self._consumer_task_medium, args=(task_info, consumer_info_dict, )
+            ))
+        for task in task_bank:
+            task.start()
+        for task in task_bank:
+            task.join()
         # write into db
-        offline_w_bank = []
-        for i in range(10):
-            offline_th = threading.Thread(
-                target=self._write_offline_data, args=(
-                    offline_task_list[i], offline_info_dict, ))
-            offline_w_bank.append(offline_th)
-        for i in range(10):
-            offline_w_bank[i].start()
-        for i in range(10):
-            offline_w_bank[i].join()
+        consumer_w_bank = []
+        for task_info in consumer_task:
+            consumer_w_bank.append(threading.Thread(
+                target=self._write_consumer_data, args=(task_info, consumer_info_dict, )
+            ))
+        for task in consumer_w_bank:
+            task.start()
+        for task in consumer_w_bank:
+            task.join()
 
-    def _write_offline_data(self, room_list, offline_info_dict):
+    def _write_consumer_data(self, room_list, consumer_info_dict):
         insert_sql = "INSERT INTO {0}(userid,username,xingbi,roomid,time) VALUES ('{1}','{2}','{3}','{4}','{5}')"
         sql_list = []
         for room_id in room_list:
-            js = offline_info_dict.get(room_id)
-            data = js['response']['data']
-            if data:
-                rank_list = []
-                for info in data:
-                    user_id = info['userId']
-                    user_name = info['nickName']
-                    star_coin = info['coins']
-                    sql_list.append(
-                        insert_sql.format(
-                            self.consumer_db,
-                            user_id,
-                            user_name,
-                            star_coin,
-                            room_id,
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            if consumer_info_dict.get(room_id):
+                js = consumer_info_dict.get(room_id)
+                data = js['response']['data']
+                if data:
+                    rank_list = []
+                    for info in data:
+                        user_id = info['userId']
+                        user_name = info['nickName']
+                        star_coin = info['coins']
+                        sql_list.append(
+                            insert_sql.format(
+                                self.consumer_db,
+                                user_id,
+                                user_name,
+                                star_coin,
+                                room_id,
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                # Uncomment to observe the state of js
+                # having observed for a short time, only when no consumer
+                # else:
+                #     self._write_exception_log(
+                #         '\n{0} no_info_in_js {1}'.format(datetime.now(), room_id)
+                #     )
+            else:
+                self._write_exception_log(
+                    '\n{0} no_js_in_dict {1}'.format(datetime.now(), room_id)
+                )
         self.execute_db_more(sql_list)
 
-    def _off_task_medium(self, room_part, offline_info_dict):
+    def _consumer_task_medium(self, room_part, consumer_info_dict):
         url_dict = {}
         for room_id in room_part:
             url_dict[room_id] = self.current_rank_url.format(room_id)
-        self.request_get_more(url_dict, offline_info_dict)
+        self.request_get_more(url_dict, consumer_info_dict)
 
-    def _online_task(self, room_list):
-        online_info_dict = {}
-        # online selenium task
-        online_task_num = math.ceil(len(room_list) / 10)
-        online_task_list = []
-        for i in range(1, 2):
-            online_task_list.append(
-                room_list[online_task_num * (i - 1):online_task_num * i])
-        online_task_list.append(room_list[online_task_num * 1:])
-        online_bank = []
-        for i in range(2):
-            online_th = threading.Thread(
-                target=self._get_online_info, args=(
-                    online_task_list[i], online_info_dict,))
-            online_bank.append(online_th)
-        for i in range(2):
-            online_bank[i].start()
-        for i in range(2):
-            online_bank[i].join()
+    def _anchor_task(self, anchor_list, offline_list):
+        anchor_info_dict = {}
+        # anchor spider task
+        anchor_task = self.sort_thread_para_list(para_list=anchor_list, default_task_num=5)
+        anchor_task_bank = []
+        for task_info in anchor_task:
+            anchor_task_bank.append(
+                threading.Thread(target=self._get_anchor_info, args=(task_info, anchor_info_dict,))
+            )
+        for task in anchor_task_bank:
+            task.start()
+        for task in anchor_task_bank:
+            task.join()
         # write into database
-        online_task_num = math.ceil(len(room_list) / 10)
-        online_task_list = []
-        for i in range(1, 10):
-            online_task_list.append(
-                room_list[online_task_num * (i - 1):online_task_num * i])
-        online_task_list.append(room_list[online_task_num * 9:])
-        online_w_bank = []
-        for i in range(10):
-            online_th = threading.Thread(
-                target=self._write_online_data, args=(
-                    online_task_list[i], online_info_dict,))
-            online_w_bank.append(online_th)
-        for i in range(10):
-            online_w_bank[i].start()
-        for i in range(10):
-            online_w_bank[i].join()
+        # find no data when write add room id into no_data_room_list
+        no_data_room_list = [[], []]
+        anchor_task = self.sort_thread_para_list(para_list=anchor_list, default_task_num=10)
+        anchor_task_bank = []
+        for task_info in anchor_task:
+            anchor_task_bank.append(
+                threading.Thread(
+                    target=self._write_anchor_data, args=(task_info, anchor_info_dict, no_data_room_list, offline_list)
+                )
+            )
+        for task in anchor_task_bank:
+            task.start()
+        for task in anchor_task_bank:
+            task.join()
         self.clear_program()
+        return no_data_room_list
 
-    def _write_online_data(self, room_list, online_info_dict):
+    def _write_anchor_data(self, room_list, anchor_info_dict, no_data_room_list, offline_list):
         conn = pymysql.connect(
             host=self.database_dict.get('host'),
             port=self.database_dict.get('port'),
@@ -443,33 +639,46 @@ class LaiThread:
             charset='utf8')
         cu = conn.cursor()
         for room_info in room_list:
-            if online_info_dict.get(room_info):
-                data = online_info_dict[room_info]
+            if anchor_info_dict.get(room_info):
+                data = anchor_info_dict[room_info]
                 try:
-                    sql_command = "INSERT INTO {6}(roomid,peo,xingbi,renqi,online,time) VALUES ('{0}','{1}','{2}'," \
-                                  "'{3}','{4}','{5}')".format(
-                                        room_info, data[0].replace("'", ''), data[1], data[2], data[3],
-                                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.anchor_db
-                                                            )
+                    if '/' in data:
+                        no_data_room_list[0].append(room_info)
+                        self._write_exception_log(
+                            '\n{0} read_/_err:{1}'.format(datetime.now(), room_info)
+                        )
+                        sql_command = "INSERT INTO {6}(roomid,peo,xingbi,renqi,online,time,isdelete) VALUES ('{0}'," \
+                                      "'{1}','{2}','{3}','{4}','{5}',True)".format(
+                                            room_info, data[0].replace("'", ''), data[1], data[2], data[3],
+                                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.anchor_db
+                                                                )
+                    else:
+                        if '0' in data and room_info in offline_list:
+                            no_data_room_list[1].append(room_info)
+                            self._write_exception_log(
+                                '\n{0} read_zero_data:{1}'.format(datetime.now(), room_info)
+                            )
+                        sql_command = "INSERT INTO {6}(roomid,peo,xingbi,renqi,online,time) VALUES ('{0}','{1}'," \
+                                      "'{2}','{3}','{4}','{5}')".format(
+                                            room_info, data[0].replace("'", ''), data[1], data[2], data[3],
+                                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.anchor_db
+                                                                )
                     cu.execute(sql_command)
                     conn.commit()
                 except Exception as err:
                     data_err = ' '.join([str(da) for da in data])
-                    with open(os.path.join(
-                            self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-                        fh.write(
-                            '\n{0} write_sql_err:{1}\nmgs:{2}\ndata:{3}'.format(
-                                datetime.now(), err, room_info, data_err))
+                    self._write_exception_log(
+                        '\n{0} write_sql_err:{1}\nmgs:{2}\ndata:{3}'.format(datetime.now(), err, room_info, data_err)
+                    )
             else:
-                with open(os.path.join(
-                        self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-                    fh.write(
-                        '\n{0} no_read_data:{1}'.format(
-                            datetime.now(), room_info))
+                no_data_room_list[0].append(room_info)
+                self._write_exception_log(
+                    '\n{0} no_read_data:{1}'.format(datetime.now(), room_info)
+                )
         cu.close()
         conn.close()
 
-    def _get_online_info(self, room_list, online_info_dict):
+    def _get_anchor_info(self, room_list, anchor_info_dict):
         warnings.filterwarnings('ignore')
         options = webdriver.ChromeOptions()
         options.add_argument('--headless')
@@ -488,29 +697,67 @@ class LaiThread:
                 load_status = True
             except TimeoutException as err:
                 load_status = False
+            content = client.page_source
             if load_status:
                 try:
-                    online_info_dict[room] = self.v_type_xpath(client)
+                    anchor_info_dict[room] = self.v_xpath_read(content)
                 except Exception as err:
-                    with open(os.path.join(
-                            self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-                        fh.write(
-                            '\n{0} no_v_xpath:{1} err:{2}'.format(
-                                datetime.now(), room, err))
-                    online_info_dict[room] = self.h_type_xpath(client)
+                    self._write_exception_log(
+                        '\n{0} no_v_xpath:{1} err:{2}'.format(datetime.now(), room, err)
+                    )
+                    anchor_info_dict[room] = self.h_xpath_read(content)
             else:
                 try:
-                    online_info_dict[room] = self.h_type_xpath(client)
+                    anchor_info_dict[room] = self.h_xpath_read(content)
                 except Exception:
                     try:
-                        online_info_dict[room] = self.v_type_xpath(client)
+                        anchor_info_dict[room] = self.v_xpath_read(content)
                     except Exception as err:
-                        with open(os.path.join(
-                                self.log_path, self.error_log.format(datetime.now().strftime('%Y%m%d'))), 'a') as fh:
-                            fh.write(
-                                '\n{0} second_v_xpath_err:{1} err:{2}'.format(
-                                    datetime.now(), room, err))
+                        self._write_exception_log(
+                            '\n{0} second_v_xpath_err:{1} err:{2}'.format(datetime.now(), room, err)
+                        )
         client.quit()
+
+    @staticmethod
+    def h_xpath_read(source_page):
+        html = etree.HTML(source_page)
+        pat = re.compile(r'^.*?：(.*?)$')
+        star_coin = html.xpath(
+            '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[2]/div[2]/'
+            'span[@class="stars_1YLot"]/text()'
+        )[0]
+        star_coin = pat.findall(star_coin)[0]
+        popular = html.xpath(
+            '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[2]/div[2]/'
+            'span[@class="room-popular_bUt9g"]/text()'
+        )[0]
+        popular = pat.findall(popular)[0]
+        online = html.xpath(
+            '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[2]/div[2]/'
+            'span[@class="online-people_rLgAG"]/text()'
+        )[0]
+        online = pat.findall(online)[0]
+        name = html.xpath(
+            '/html/body/div/div/div[3]/div[1]/div[1]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]/text()'
+        )[0]
+        return [name, star_coin, popular, online]
+
+    @staticmethod
+    def v_xpath_read(source_page):
+        html = etree.HTML(source_page)
+        star_coin = html.xpath(
+            '//*[@id="LF-info-count"]/div/div[@class="gift"]/div[@class="info"]/cite/text()'
+        )[0]
+        popular = html.xpath(
+            '//*[@id="LF-info-count"]/div/div[@class="rq"]/div[@class="info"]/cite/text()'
+        )[0]
+        online = html.xpath(
+            '//*[@id="LF-info-count"]/div/div[@class="online"]/div[@class="info"]/cite/text()'
+        )[0]
+        name = html.xpath(
+            '/html/body/div/div[2]/div[2]/div[2]/dl/dd/span/text()'
+        )[0]
+        return [name, star_coin, popular, online]
 
     @staticmethod
     def h_type_xpath(client):
@@ -575,38 +822,36 @@ class LaiThread:
             except NoSuchElementException:
                 return True
 
-    def update_living_list(self, living_list):
-        living_num = len(living_list)
+    def update_ten_mark_list(self, db_name, data_list):
+        data_num = len(data_list)
         sql_list = []
-        group_num = math.ceil(living_num / 10)
+        group_num = math.ceil(data_num / 10)
         # mark sql
         mark_content = '{0}_{1}'.format(
-            group_num + 1, datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
+            group_num + 1, datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        )
         sql_list.append(
             r"INSERT INTO {0}(id, content) VALUES({1}, '{2}') ON DUPLICATE KEY UPDATE content='{2}'".format(
-                self.living_db, 1, mark_content))
+                db_name, 1, mark_content))
         # content sql
         for i in range(group_num - 1):
             sql_list.append(r"INSERT INTO {0}(id, content) VALUES({1}, '{2}') ON DUPLICATE KEY UPDATE "
                             r"content='{2}'".format(
-                                self.living_db, i + 2, self.join_num(living_list[i * 10:(i + 1) * 10])
+                                db_name, i + 2, self.join_num(data_list[i * 10:(i + 1) * 10])
                                                     ))
         # the last sql
         sql_list.append(r"INSERT INTO {0}(id, content) VALUES({1}, '{2}') ON DUPLICATE KEY UPDATE content='{2}'".format(
-            self.living_db, group_num + 1, self.join_num(living_list[(group_num - 1) * 10:])))
-        task_num = math.ceil(group_num / 10)
-        t_bank = []
-        for i in range(9):
-            th = threading.Thread(target=self.execute_db_more, args=(
-                sql_list[i * task_num:(i + 1) * task_num], ))
-            t_bank.append(th)
-        th = threading.Thread(target=self.execute_db_more,
-                              args=(sql_list[9 * task_num:], ))
-        t_bank.append(th)
-        for i in range(10):
-            t_bank[i].start()
-        for i in range(10):
-            t_bank[i].join()
+            db_name, group_num + 1, self.join_num(data_list[(group_num - 1) * 10:])))
+        task_list = self.sort_thread_para_list(sql_list)
+        task_bank = []
+        for task_info in task_list:
+            task_bank.append(threading.Thread(
+                target=self.execute_db_more, args=(task_info, )
+            ))
+        for task in task_bank:
+            task.start()
+        for task in task_bank:
+            task.join()
 
     @property
     def get_living_room_id(self):
@@ -705,6 +950,13 @@ class LaiThread:
 if __name__ == '__main__':
     warnings.filterwarnings('ignore')
     lai = LaiThread()
+    lai.anchor_db = 'anchor'
+    lai.anchor_mark_db = 'anchormark'
+    lai.consumer_mark_db = 'consumermark'
+    lai.consumer_db = 'consumerrank'
+    lai.living_db = 'living'
+    lai.useless_db = 'useless'
+    lai.zero_db = 'zero'
     lai.create_database()
     lai.clean()
     lai.run_spider()

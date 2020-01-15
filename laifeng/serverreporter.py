@@ -96,7 +96,7 @@ class AnalyseData:
         int_list = list(map(str, int_list))
         return '_'.join(int_list)
 
-    def read_db_all(self, db_name, start_id, end_id):
+    def read_db_all(self, db_name, start_id, end_id, is_delete=True):
         conn = pymysql.connect(
             host=self.database_dict.get('host'),
             port=self.database_dict.get('port'),
@@ -105,8 +105,14 @@ class AnalyseData:
             db=self.database_dict.get('db'),
             charset='utf8')
         cu = conn.cursor()
-        cu.execute(
-            'SELECT * FROM {} WHERE isdelete=false AND id >= {} AND id < {}'.format(db_name, start_id, end_id))
+        if is_delete:
+            cu.execute(
+                'SELECT * FROM {} WHERE isdelete=false AND id >= {} AND id <= {}'.format(db_name, start_id, end_id)
+            )
+        else:
+            cu.execute(
+                'SELECT * FROM {} WHERE id >= {} AND id <= {}'.format(db_name, start_id, end_id)
+            )
         data = cu.fetchall()
         cu.close()
         conn.close()
@@ -190,6 +196,11 @@ class AnalyseData:
         for task in task_bank:
             task.join()
 
+    @staticmethod
+    def add2item(add_list, add2item):
+        for item in add_list:
+            add2item.add(item)
+
     def reporter(self, today):
         data_bank = self.get_one_day_data(today)
         anchor_rank_list = self._writer(data_bank, today - timedelta(days=1))
@@ -209,7 +220,7 @@ class AnalyseData:
     def send_mail(file_address, file_name):
         from_address = 'cms199631@163.com'
         password = 'cms146847'
-        toaddrs = ['cms199631@163.com', ]
+        toaddrs = ['cms199631@163.com', 'kymlinqi@outlook.com', ]
         content = '排行榜数据'
         text_part = MIMEText(content)
         xls_part = MIMEApplication(open(file_address, 'rb').read())
@@ -218,19 +229,36 @@ class AnalyseData:
         m.attach(text_part)
         m.attach(xls_part)
         m['Subject'] = '主播玩家排行'
-        server = smtplib.SMTP('smtp.163.com')
+        m['From'] = from_address
+        m['To'] = ','.join(toaddrs)
+        server = smtplib.SMTP_SSL('smtp.163.com', 465)
+        # server.set_debuglevel(1)
+        # server.connect('smtp.163.com', 25)
         server.login(from_address, password)
         server.sendmail(from_address, toaddrs, m.as_string())
         server.quit()
 
     def _update_hot_list(self, top_data):
         hot_list = set()
+        old_hot_list = self._get_old_hot_list()
         for part in top_data:
             for i in range(3):
                 for j in range(1, 31):
-                    hot_list.add(part[i][j][1])
+                    hot_list.add(int(part[i][j][1]))
+        self.add2item(old_hot_list, hot_list)
         hot_list = list(hot_list)
         self.update_ten_mark_list_for_hot(self.hot_anchor_db, hot_list)
+
+    def _get_old_hot_list(self):
+        hot_list = []
+        # read hot list
+        hot_mark = self.read_db_all(self.hot_anchor_db, 1, 1, is_delete=False)
+        raw_list = self.read_db_all(self.hot_anchor_db, 2, int(hot_mark[0][1]), is_delete=False)
+        for room in raw_list:
+            pat_list = room[1].split('_')
+            for room_id in pat_list:
+                hot_list.append(room_id)
+        return list(map(int, hot_list))
 
     def update_ten_mark_list_for_hot(self, db_name, data_list):
         data_num = len(data_list)
@@ -634,7 +662,7 @@ class AnalyseData:
         # sort customer info by time_table
         for mark_time in time_table:
             for i in range(read_mark, len(clean_list)):
-                if clean_list[i][3] <= mark_time:
+                if clean_list[i][3] < mark_time:
                     if sort_dict.get(clean_list[i][0]):
                         sort_dict[clean_list[i][0]][0] = clean_list[i][1]
                         sort_dict[clean_list[i][0]][1] = max(sort_dict[clean_list[i][0]][1], int(clean_list[i][2]))
